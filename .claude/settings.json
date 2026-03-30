@@ -1,0 +1,5 @@
+{
+  "permissions": {
+    "allow": ["Bash(node /home/racso/Documentos/claude_wa/contacts.js *)"]
+  }
+}

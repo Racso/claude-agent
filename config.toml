@@ -1,0 +1,7 @@
+[admins]
+# Phone numbers with full admin access (digits only, no + or spaces)
+numbers = ["573163419458"]
+
+[settings]
+# In groups, only respond when the bot is @mentioned
+group_mention_only = true

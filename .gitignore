@@ -1,0 +1,5 @@
+node_modules/
+whatsapp_auth/
+whatsapp_cache/
+sessions.json
+contacts.json
