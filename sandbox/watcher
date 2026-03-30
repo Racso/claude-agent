@@ -1,0 +1,68 @@
+#!/bin/bash
+# Runs on the HOST. Monitors the workspace .requests/ dir and handles approvals.
+# Usage: watcher <workspace> [true|false (auto-approve)]
+
+set -euo pipefail
+
+WORKSPACE="${1:?Usage: watcher <workspace> [auto-approve]}"
+AUTO_APPROVE="${2:-false}"
+
+REQUESTS_DIR="$WORKSPACE/.requests"
+RESPONSES_DIR="$WORKSPACE/.responses"
+HANDLED_DIR="$WORKSPACE/.handled"
+
+mkdir -p "$REQUESTS_DIR" "$RESPONSES_DIR" "$HANDLED_DIR"
+echo "[watcher] Started — monitoring $REQUESTS_DIR" >&2
+
+handle_request() {
+    local basename="$1"
+    local id="${basename%.req}"
+    local resp_file="$RESPONSES_DIR/$id.resp"
+    local handled_marker="$HANDLED_DIR/$id"
+
+    [[ -f "$resp_file" ]]     && return  # already responded
+    [[ -f "$handled_marker" ]] && return  # being handled
+    touch "$handled_marker"
+
+    mapfile -t lines < "$REQUESTS_DIR/$basename"
+    local path="${lines[1]}"
+    local reason="${lines[2]}"
+    local mode="${lines[3]:-r}"
+    local mode_label
+    [[ "$mode" == "rw" ]] && mode_label="read-write" || mode_label="read-only"
+
+    local answer
+    if [[ "$AUTO_APPROVE" == "true" ]]; then
+        answer="y"
+        echo "[watcher] Auto-approving ($mode_label): $path" >&2
+    else
+        printf '\n[sandbox] Claude requests file access:\n'
+        printf '  Path   : %s\n' "$path"
+        printf '  Reason : %s\n' "$reason"
+        printf '  Mode   : %s\n' "$mode_label"
+        read -rp "Allow? [y/n] " answer < /dev/tty
+    fi
+
+    if [[ "$answer" == [yY] ]]; then
+        local dest="$WORKSPACE/$(basename "$path")"
+        if [[ "$mode" == "rw" ]]; then
+            ln -sf "$path" "$dest"
+        else
+            cp "$path" "$dest"
+        fi
+        printf 'granted\n%s\n' "/workspace/$(basename "$path")" > "$resp_file"
+        echo "[watcher] Granted → $(basename "$path")" >&2
+    else
+        echo "denied" > "$resp_file"
+        echo "[watcher] Denied: $path" >&2
+    fi
+}
+
+# Poll loop
+while true; do
+    for req_file in "$REQUESTS_DIR"/*.req; do
+        [[ -f "$req_file" ]] || continue
+        handle_request "$(basename "$req_file")"
+    done
+    sleep 0.3
+done

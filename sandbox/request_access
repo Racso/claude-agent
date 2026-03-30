@@ -1,0 +1,37 @@
+#!/bin/bash
+# Runs INSIDE the bwrap sandbox.
+# Usage: request_access <path> <reason> [r|rw]
+# Outputs the workspace path of the approved file, exits 1 if denied or timed out.
+
+set -euo pipefail
+
+ORIGINAL_PATH="${1:?Usage: request_access <path> <reason> [r|rw]}"
+REASON="${2:-no reason given}"
+MODE="${3:-r}"
+ID="$$_${RANDOM}"
+
+REQUESTS_DIR="/workspace/.requests"
+RESPONSES_DIR="/workspace/.responses"
+
+printf '%s\n%s\n%s\n%s\n' "$ID" "$ORIGINAL_PATH" "$REASON" "$MODE" \
+    > "$REQUESTS_DIR/$ID.req"
+
+echo "[request_access] Waiting for approval: $ORIGINAL_PATH" >&2
+
+# Poll for response — 120s timeout (400 × 0.3s)
+for _ in $(seq 1 400); do
+    if [[ -f "$RESPONSES_DIR/$ID.resp" ]]; then
+        STATUS=$(head -1 "$RESPONSES_DIR/$ID.resp")
+        if [[ "$STATUS" == "granted" ]]; then
+            sed -n '2p' "$RESPONSES_DIR/$ID.resp"
+            exit 0
+        else
+            echo "[request_access] Denied: $ORIGINAL_PATH" >&2
+            exit 1
+        fi
+    fi
+    sleep 0.3
+done
+
+echo "[request_access] Timed out waiting for approval" >&2
+exit 1

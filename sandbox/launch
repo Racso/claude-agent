@@ -1,0 +1,81 @@
+#!/bin/bash
+# Launches Claude inside a bwrap sandbox with a request_access escape hatch.
+# Usage: echo "prompt" | ./launch [--auto-approve] [extra claude args...]
+# Output: claude's JSON response on stdout; sandbox messages on stderr.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+AUTO_APPROVE="false"
+CLAUDE_ARGS=()
+
+for arg in "$@"; do
+    case "$arg" in
+        --auto-approve) AUTO_APPROVE="true" ;;
+        *) CLAUDE_ARGS+=("$arg") ;;
+    esac
+done
+
+# Create per-session workspace
+WORKSPACE=$(mktemp -d /tmp/claude_sandbox_XXXX)
+mkdir -p "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled"
+echo "[sandbox] Workspace: $WORKSPACE" >&2
+
+# Inject request_access into the workspace so it's on PATH inside the sandbox
+mkdir -p "$WORKSPACE/.bin"
+cp "$SCRIPT_DIR/request_access" "$WORKSPACE/.bin/request_access"
+chmod +x "$WORKSPACE/.bin/request_access"
+
+# Start the host-side watcher
+"$SCRIPT_DIR/watcher" "$WORKSPACE" "$AUTO_APPROVE" &
+WATCHER_PID=$!
+
+cleanup() {
+    kill "$WATCHER_PID" 2>/dev/null || true
+    rm -rf "$WORKSPACE"
+    echo "[sandbox] Cleaned up." >&2
+}
+trap cleanup EXIT
+
+bwrap \
+    --unshare-all \
+    --share-net \
+    \
+    --ro-bind /usr /usr \
+    --symlink usr/lib    /lib \
+    --symlink usr/lib64  /lib64 \
+    --symlink usr/bin    /bin \
+    --symlink usr/sbin   /sbin \
+    \
+    --ro-bind /etc/resolv.conf       /etc/resolv.conf \
+    --ro-bind /etc/ssl/certs         /etc/ssl/certs \
+    --ro-bind /etc/nsswitch.conf     /etc/nsswitch.conf \
+    --ro-bind /etc/hosts             /etc/hosts \
+    --ro-bind /etc/passwd            /etc/passwd \
+    --ro-bind /etc/group             /etc/group \
+    \
+    --tmpfs "$HOME" \
+    --dir   "$HOME/.local" \
+    --dir   "$HOME/.local/share" \
+    --dir   "$HOME/.local/bin" \
+    --ro-bind "$HOME/.local/share/claude" "$HOME/.local/share/claude" \
+    --ro-bind "$HOME/.local/bin"          "$HOME/.local/bin" \
+    --bind   "$HOME/.claude"              "$HOME/.claude" \
+    --bind   "$HOME/.claude.json"         "$HOME/.claude.json" \
+    \
+    --bind "$WORKSPACE" /workspace \
+    \
+    --dev   /dev \
+    --proc  /proc \
+    --tmpfs /tmp \
+    \
+    --setenv HOME "$HOME" \
+    --setenv PATH "/workspace/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    \
+    -- \
+    "$HOME/.local/bin/claude" \
+    --print \
+    --output-format json \
+    --permission-mode bypassPermissions \
+    "${CLAUDE_ARGS[@]}"

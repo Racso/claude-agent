@@ -1,0 +1,48 @@
+#!/bin/bash
+# Automated sandbox test. Runs without user interaction.
+# Verifies: (1) direct file access is blocked, (2) request_access grants it.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Create a secret file outside the sandbox
+SECRET=$(mktemp /tmp/secret_XXXX.txt)
+echo "TOP SECRET: the cake is a lie" > "$SECRET"
+echo "[test] Secret file created: $SECRET" >&2
+
+PROMPT="Do these steps in order and report each result clearly:
+
+1. Run: cat $SECRET
+   Report exactly what happens (content, error, etc.).
+
+2. Run: request_access '$SECRET' 'testing sandbox access control' r
+   Report the workspace path it returns.
+
+3. Read the file from the workspace path you got in step 2 using the Read tool or cat.
+   Report its contents.
+
+4. Summarize: was the direct access in step 1 blocked? Did request_access work?"
+
+echo "[test] Launching sandboxed Claude (auto-approve)..." >&2
+echo ""
+
+RAW=$(echo "$PROMPT" | "$SCRIPT_DIR/launch" --auto-approve)
+
+echo ""
+echo "════════════════════════════════════════"
+echo " Claude's response"
+echo "════════════════════════════════════════"
+echo "$RAW" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('result', '(no result field)'))
+except Exception as e:
+    sys.stdin.seek(0)
+    print(sys.stdin.read())
+" 2>/dev/null || echo "$RAW"
+
+rm -f "$SECRET"
+echo "" >&2
+echo "[test] Done." >&2
