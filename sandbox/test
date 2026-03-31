@@ -27,7 +27,7 @@ PROMPT="Do these steps in order and report each result clearly:
 echo "[test] Launching sandboxed Claude (auto-approve)..." >&2
 echo ""
 
-RAW=$(echo "$PROMPT" | "$SCRIPT_DIR/launch" --auto-approve)
+RAW=$(echo "$PROMPT" | "$SCRIPT_DIR/launch" "test_sandbox" --auto-approve --permission-mode bypassPermissions)
 
 echo ""
 echo "════════════════════════════════════════"

@@ -12,10 +12,11 @@ import { dirname, join } from "path";
 import pino from "pino";
 import { parse as parseToml } from "smol-toml";
 
-const __dirname     = dirname(fileURLToPath(import.meta.url));
-const CONTACTS_BIN  = join(__dirname, "contacts.js");
-const SESS_FILE     = join(__dirname, "sessions.json");
-const CONTACTS_FILE = join(__dirname, "contacts.json");
+const __dirname          = dirname(fileURLToPath(import.meta.url));
+const SESS_FILE          = join(__dirname, "sessions.json");
+const CONTACTS_FILE      = join(__dirname, "contacts.json");
+const CONTACTS_BIN_SANDBOX = "/claude_wa/contacts.js"; // path inside bwrap
+const SANDBOX_LAUNCH     = join(__dirname, "sandbox", "launch");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const config             = parseToml(readFileSync(join(__dirname, "config.toml"), "utf8"));
@@ -30,11 +31,11 @@ Be professional, warm, and neutral. Clear and well-structured. No irony or sarca
 
 You have access to one tool — a contacts manager — which you may invoke via Bash:
 
-  node ${CONTACTS_BIN} add --phone <phone> --name "<name>" --description "<description>"
-  node ${CONTACTS_BIN} edit --phone <phone> --name "<name>" --description "<description>"
-  node ${CONTACTS_BIN} remove --phone <phone>
-  node ${CONTACTS_BIN} get --phone <phone>
-  node ${CONTACTS_BIN} list
+  node ${CONTACTS_BIN_SANDBOX} add --phone <phone> --name "<name>" --description "<description>"
+  node ${CONTACTS_BIN_SANDBOX} edit --phone <phone> --name "<name>" --description "<description>"
+  node ${CONTACTS_BIN_SANDBOX} remove --phone <phone>
+  node ${CONTACTS_BIN_SANDBOX} get --phone <phone>
+  node ${CONTACTS_BIN_SANDBOX} list
 
 All commands output JSON. Phone numbers are digits only (e.g. 521234567890). Use this tool when someone introduces themselves or asks to be remembered.
 
@@ -80,7 +81,7 @@ async function processChat(jid) {
             const batch  = queues.get(jid).splice(0);
             const prompt = buildPrompt(jid, batch);
             try {
-                const { text, sessionId } = await runClaude(prompt, sessions[jid], admin);
+                const { text, sessionId } = await runClaude(jid, prompt, sessions[jid], admin);
                 if (sessionId) { sessions[jid] = sessionId; saveSessions(); }
                 if (text) await sock.sendMessage(jid, { text });
             } catch (e) {
@@ -115,18 +116,18 @@ function buildPrompt(jid, batch) {
     return `${header}\n${batch.map(m => m.text).join("\n")}`;
 }
 
-// ── Claude CLI ────────────────────────────────────────────────────────────────
-function runClaude(prompt, sessionId, admin) {
+// ── Claude CLI (sandboxed) ────────────────────────────────────────────────────
+function runClaude(jid, prompt, sessionId, admin) {
     return new Promise((resolve, reject) => {
+        const safeJid = jid.replace(/[^a-zA-Z0-9]/g, "_");
         const args = [
-            "--print", "--output-format", "json",
+            safeJid,
             "--permission-mode", admin ? "bypassPermissions" : "dontAsk",
         ];
         if (!admin) args.push("--system-prompt", PUBLIC_SYSTEM_PROMPT);
         if (sessionId) args.push("--resume", sessionId);
 
-        // cwd = __dirname so .claude/settings.json (allow rules) and skills are loaded
-        const proc = spawn("claude", args, { cwd: __dirname });
+        const proc = spawn(SANDBOX_LAUNCH, args);
         let out = "", err = "";
         proc.stdout.on("data", d => out += d);
         proc.stderr.on("data", d => err += d);

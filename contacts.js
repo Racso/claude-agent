@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 const __dirname     = dirname(fileURLToPath(import.meta.url));
-const CONTACTS_FILE = join(__dirname, "contacts.json");
+const CONTACTS_FILE = process.env.CONTACTS_FILE ?? join(__dirname, "contacts.json");
 
 function load() {
     if (!existsSync(CONTACTS_FILE)) return {};

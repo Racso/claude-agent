@@ -1,15 +1,21 @@
 #!/bin/bash
 # Launches Claude inside a bwrap sandbox with a request_access escape hatch.
-# Usage: echo "prompt" | ./launch [--auto-approve] [extra claude args...]
+# Usage: echo "prompt" | ./launch <conv_id> [--auto-approve] [claude args...]
 # Output: claude's JSON response on stdout; sandbox messages on stderr.
+#
+# The workspace at /tmp/claude_sandbox_<conv_id> persists across calls so
+# approved files carry over between messages in the same conversation.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+CONV_ID="${1:?Usage: launch <conv_id> [--auto-approve] [claude args...]}"
+shift
 
 AUTO_APPROVE="false"
 CLAUDE_ARGS=()
-
 for arg in "$@"; do
     case "$arg" in
         --auto-approve) AUTO_APPROVE="true" ;;
@@ -17,15 +23,17 @@ for arg in "$@"; do
     esac
 done
 
-# Create per-session workspace
-WORKSPACE=$(mktemp -d /tmp/claude_sandbox_XXXX)
-mkdir -p "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled"
+# Stable workspace per conversation — persists between calls
+WORKSPACE="/tmp/claude_sandbox_$CONV_ID"
+mkdir -p "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled" "$WORKSPACE/.bin"
 echo "[sandbox] Workspace: $WORKSPACE" >&2
 
-# Inject request_access into the workspace so it's on PATH inside the sandbox
-mkdir -p "$WORKSPACE/.bin"
+# Inject request_access (refresh on every call in case it was updated)
 cp "$SCRIPT_DIR/request_access" "$WORKSPACE/.bin/request_access"
 chmod +x "$WORKSPACE/.bin/request_access"
+
+# Ensure contacts.json exists so we can bind-mount it rw
+[[ -f "$PROJECT_DIR/contacts.json" ]] || echo '{}' > "$PROJECT_DIR/contacts.json"
 
 # Start the host-side watcher
 "$SCRIPT_DIR/watcher" "$WORKSPACE" "$AUTO_APPROVE" &
@@ -33,8 +41,9 @@ WATCHER_PID=$!
 
 cleanup() {
     kill "$WATCHER_PID" 2>/dev/null || true
-    rm -rf "$WORKSPACE"
-    echo "[sandbox] Cleaned up." >&2
+    # Clean per-session dirs but preserve workspace and approved files
+    rm -rf "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled"
+    echo "[sandbox] Session ended. Workspace preserved: $WORKSPACE" >&2
 }
 trap cleanup EXIT
 
@@ -64,18 +73,22 @@ bwrap \
     --bind   "$HOME/.claude"              "$HOME/.claude" \
     --bind   "$HOME/.claude.json"         "$HOME/.claude.json" \
     \
-    --bind "$WORKSPACE" /workspace \
+    --ro-bind "$PROJECT_DIR"              /claude_wa \
+    --bind   "$PROJECT_DIR/contacts.json" /workspace/contacts.json \
+    --bind   "$WORKSPACE"                 /workspace \
     \
     --dev   /dev \
     --proc  /proc \
     --tmpfs /tmp \
     \
-    --setenv HOME "$HOME" \
-    --setenv PATH "/workspace/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    --setenv HOME         "$HOME" \
+    --setenv PATH         "/workspace/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    --setenv CONTACTS_FILE /workspace/contacts.json \
+    \
+    --chdir /claude_wa \
     \
     -- \
     "$HOME/.local/bin/claude" \
     --print \
     --output-format json \
-    --permission-mode bypassPermissions \
     "${CLAUDE_ARGS[@]}"
