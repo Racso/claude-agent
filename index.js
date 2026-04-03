@@ -6,7 +6,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import { spawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import pino from "pino";
@@ -17,6 +17,7 @@ const SESS_FILE          = join(__dirname, "sessions.json");
 const CONTACTS_FILE      = join(__dirname, "contacts.json");
 const CONTACTS_BIN_SANDBOX = "/claude_wa/contacts.js"; // path inside bwrap
 const SANDBOX_LAUNCH     = join(__dirname, "sandbox", "launch");
+const ERROR_LOG          = join(__dirname, "errors.log");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const config             = parseToml(readFileSync(join(__dirname, "config.toml"), "utf8"));
@@ -40,6 +41,50 @@ You have access to one tool — a contacts manager — which you may invoke via 
 All commands output JSON. Phone numbers are digits only (e.g. 521234567890). Use this tool when someone introduces themselves or asks to be remembered.
 
 All other tools (file system, web search, command execution, etc.) are unavailable and will be automatically denied. Do not attempt to use them. When a request requires capabilities you don't have, respond conversationally and explain.`;
+
+// ── Error logging & self-repair ───────────────────────────────────────────────
+let repairInProgress = false;
+
+function logError(error, context = {}) {
+    const entry = {
+        timestamp: new Date().toISOString(),
+        ...context,
+        message: error.message,
+        stack: error.stack,
+    };
+    try { appendFileSync(ERROR_LOG, JSON.stringify(entry) + "\n"); } catch {}
+}
+
+function invokeRepair(error, context = {}) {
+    if (repairInProgress) return;
+    repairInProgress = true;
+
+    const prompt =
+        `An error occurred in the claude_wa WhatsApp bot.\n\n` +
+        `Timestamp: ${new Date().toISOString()}\n` +
+        `Context: ${JSON.stringify(context)}\n` +
+        `Error: ${error.message}\n` +
+        `Stack:\n${error.stack}\n\n` +
+        `Please review the error log (errors.log) and the relevant source files, ` +
+        `identify the root cause, and fix it.`;
+
+    const proc = spawn("claude", ["--dangerously-skip-permissions", "--print", prompt], {
+        cwd: __dirname,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    proc.stdout.on("data", d => console.log("[repair]", d.toString().trimEnd()));
+    proc.stderr.on("data", d => console.error("[repair:err]", d.toString().trimEnd()));
+    proc.on("close", () => { repairInProgress = false; });
+    proc.on("error", e => { console.error("[repair:spawn]", e.message); repairInProgress = false; });
+    proc.unref();
+}
+
+process.on("uncaughtException", (e) => {
+    console.error("[uncaughtException]", e.message);
+    logError(e, { source: "uncaughtException" });
+    invokeRepair(e, { source: "uncaughtException" });
+});
 
 // ── Session persistence ───────────────────────────────────────────────────────
 const sessions = (() => {
@@ -81,11 +126,26 @@ async function processChat(jid) {
             const batch  = queues.get(jid).splice(0);
             const prompt = buildPrompt(jid, batch);
             try {
-                const { text, sessionId } = await runClaude(jid, prompt, sessions[jid], admin);
-                if (sessionId) { sessions[jid] = sessionId; saveSessions(); }
-                if (text) await sock.sendMessage(jid, { text });
+                let sessionId = sessions[jid];
+                let result;
+                try {
+                    result = await runClaude(jid, prompt, sessionId, admin);
+                } catch (e) {
+                    if (sessionId && e.message.includes("No conversation found with session ID")) {
+                        console.warn(`[claude] ${jid}: stale session ${sessionId}, retrying fresh`);
+                        delete sessions[jid];
+                        saveSessions();
+                        result = await runClaude(jid, prompt, undefined, admin);
+                    } else {
+                        throw e;
+                    }
+                }
+                if (result.sessionId) { sessions[jid] = result.sessionId; saveSessions(); }
+                if (result.text) await sock.sendMessage(jid, { text: result.text });
             } catch (e) {
                 console.error(`[claude] ${jid}:`, e.message);
+                logError(e, { jid });
+                invokeRepair(e, { jid });
                 try { await sock.sendMessage(jid, { text: "[Error processing message. Please try again.]" }); } catch {}
             }
         }
@@ -94,8 +154,22 @@ async function processChat(jid) {
     }
 }
 
+// ── Message text extraction ───────────────────────────────────────────────────
+export function extractText(msg) {
+    const m = msg.message;
+    return m?.conversation
+        ?? m?.extendedTextMessage?.text
+        ?? (m?.imageMessage    ? (m.imageMessage.caption    ?? "[image]")  : null)
+        ?? (m?.videoMessage    ? (m.videoMessage.caption    ?? (m.videoMessage.gifPlayback ? "[GIF]" : "[video]")) : null)
+        ?? (m?.audioMessage    ? "[voice message]" : null)
+        ?? (m?.documentMessage ? `[document: ${m.documentMessage.fileName ?? "file"}]` : null)
+        ?? (m?.stickerMessage  ? "[sticker]" : null)
+        ?? (m?.locationMessage ? `[location: ${m.locationMessage.name ?? "shared location"}${m.locationMessage.address ? `, ${m.locationMessage.address}` : ""} (${m.locationMessage.degreesLatitude?.toFixed(4)}, ${m.locationMessage.degreesLongitude?.toFixed(4)})]` : null)
+        ?? null;
+}
+
 // ── Prompt building ───────────────────────────────────────────────────────────
-function buildPrompt(jid, batch) {
+export function buildPrompt(jid, batch) {
     const contacts = loadContacts();
     const isGroup  = jid.endsWith("@g.us");
 
@@ -141,7 +215,7 @@ function runClaude(jid, prompt, sessionId, admin) {
     });
 }
 
-function parseClaudeOutput(raw) {
+export function parseClaudeOutput(raw) {
     try {
         const d = JSON.parse(raw.trim());
         return { text: d.result ?? raw.trim(), sessionId: d.session_id ?? null };
@@ -190,21 +264,21 @@ async function connect() {
             const rawSender = isGroup ? (msg.key.participant ?? "") : jid;
             const sender    = rawSender.replace(/@\S+$/, "");
 
-            const m = msg.message;
-            const text =
-                m?.conversation
-                ?? m?.extendedTextMessage?.text
-                ?? m?.imageMessage?.caption
-                ?? m?.videoMessage?.caption
-                ?? (m?.audioMessage    ? "[voice message]" : null)
-                ?? (m?.documentMessage ? `[document: ${m.documentMessage.fileName ?? "file"}]` : null)
-                ?? (m?.stickerMessage  ? "[sticker]" : null)
-                ?? null;
+            const text = extractText(msg);
+
+            if (process.env.DEBUG_CAPTURE) {
+                appendFileSync(
+                    join(__dirname, "fixtures", "capture.ndjson"),
+                    JSON.stringify(msg) + "\n"
+                );
+                console.log(`[capture] ${jid} type=${Object.keys(msg.message ?? {}).join(",")} text=${JSON.stringify(text)}`);
+                continue;
+            }
 
             if (!text) continue;
 
             if (isGroup && GROUP_MENTION_ONLY) {
-                const mentioned = m?.extendedTextMessage?.contextInfo?.mentionedJid ?? [];
+                const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid ?? [];
                 if (!mentioned.some(j => j.replace(/:\d+@/, "@") === botJid)) continue;
             }
 

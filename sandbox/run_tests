@@ -1,0 +1,141 @@
+#!/bin/bash
+# Run the claude_wa pipeline test suite.
+# Usage: ./run_tests [--verbose]
+#
+# Tests:
+#   1. Basic public message      — pipeline returns valid JSON with a result
+#   2. Basic admin message       — same, with bypassPermissions mode
+#   3. Session continuity        — second message can recall context from first
+#   4. Stale session error fmt   — invalid session ID produces the error message
+#                                  that index.js's stale-session handler matches on
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PASS=0
+FAIL=0
+VERBOSE=false
+[[ "${1:-}" == "--verbose" ]] && VERBOSE=true
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+pass() { echo "  ✓  $1"; ((PASS++)); }
+fail() { echo "  ✗  $1"; ((FAIL++)); }
+
+section() { echo; echo "── $1"; }
+
+extract_result() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    r = d.get('result', '')
+    if not r: raise ValueError('empty result')
+    print(r[:120])
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null
+}
+
+extract_session() {
+    echo "$1" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    s = d.get('session_id', '')
+    print(s)
+except:
+    pass
+" 2>/dev/null
+}
+
+run_msg() {
+    # run_msg <jid> [extra args...] <<< "prompt"
+    local jid="$1"; shift
+    local prompt
+    prompt=$(cat)
+    echo "$prompt" | "$SCRIPT_DIR/test_message" --jid "$jid" "$@" 2>/dev/null
+}
+
+# ── Test 0: WhatsApp format unit tests ───────────────────────────────────────
+section "0. WhatsApp format unit tests (extractText / buildPrompt / parseClaudeOutput)"
+if node "$PROJECT_DIR/test_wa_format.js" 2>/dev/null; then
+    pass "All unit tests passed"
+else
+    fail "One or more unit tests failed (run: node test_wa_format.js)"
+fi
+
+# ── Test 1: Basic public message ──────────────────────────────────────────────
+section "1. Basic public message"
+RAW=$(echo "Reply with exactly the word: pipelineok" | run_msg "rt_public" 2>/dev/null) || RAW=""
+if RESULT=$(extract_result "$RAW"); then
+    pass "Valid JSON result: $RESULT"
+else
+    fail "Invalid or empty response"
+    $VERBOSE && echo "     raw: $RAW"
+fi
+
+# ── Test 2: Basic admin message ───────────────────────────────────────────────
+section "2. Admin message"
+RAW=$(echo "Reply with exactly the word: adminok" | run_msg "rt_admin" --admin 2>/dev/null) || RAW=""
+if RESULT=$(extract_result "$RAW"); then
+    pass "Valid JSON result: $RESULT"
+else
+    fail "Invalid or empty response"
+    $VERBOSE && echo "     raw: $RAW"
+fi
+
+# ── Test 3: Session continuity ────────────────────────────────────────────────
+section "3. Session continuity"
+RAW1=$(echo "Store this code for me: DELTA-9. Just say 'stored'." | run_msg "rt_session" 2>/dev/null) || RAW1=""
+SESSION=$(extract_session "$RAW1")
+
+if [[ -z "$SESSION" ]]; then
+    fail "Message 1 returned no session_id"
+else
+    pass "Message 1 session_id: ${SESSION:0:8}..."
+    RAW2=$(echo "What was the code I asked you to store?" \
+        | run_msg "rt_session" --resume "$SESSION" 2>/dev/null) || RAW2=""
+    if RESULT2=$(extract_result "$RAW2"); then
+        if echo "$RESULT2" | grep -qi "delta"; then
+            pass "Session recalled the code: $RESULT2"
+        else
+            fail "Session did not recall code. Got: $RESULT2"
+            $VERBOSE && echo "     raw2: $RAW2"
+        fi
+    else
+        fail "Message 2 (resumed session) returned invalid response"
+        $VERBOSE && echo "     raw2: $RAW2"
+    fi
+fi
+
+# ── Test 4: Stale session error format ────────────────────────────────────────
+section "4. Stale session error format"
+# index.js catches stale sessions by checking: e.message.includes("No conversation found with session ID")
+# This test verifies that the error Claude emits still matches that string.
+FAKE_SID="00000000-0000-0000-0000-000000000000"
+LAUNCH_STDERR=$(
+    echo "hello" | "$SCRIPT_DIR/launch" "rt_stale" \
+        --permission-mode dontAsk \
+        --resume "$FAKE_SID" \
+        2>&1 >/dev/null
+) || true
+
+if echo "$LAUNCH_STDERR" | grep -q "No conversation found"; then
+    pass "Error message matches index.js stale-session handler pattern"
+else
+    fail "Error message does NOT contain 'No conversation found' — index.js handler will miss it"
+    $VERBOSE && echo "     stderr: $LAUNCH_STDERR"
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo
+echo "────────────────────────────────────────"
+printf " Results: %d passed" "$PASS"
+[[ $FAIL -gt 0 ]] && printf ", %d FAILED" "$FAIL"
+echo
+echo "────────────────────────────────────────"
+
+[[ $FAIL -eq 0 ]]
