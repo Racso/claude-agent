@@ -15,7 +15,6 @@ import { parse as parseToml } from "smol-toml";
 const __dirname          = dirname(fileURLToPath(import.meta.url));
 const SESS_FILE          = join(__dirname, "sessions.json");
 const CONTACTS_FILE      = join(__dirname, "contacts.json");
-const CONTACTS_BIN_SANDBOX = "/claude_wa/contacts.js"; // path inside bwrap
 const SANDBOX_LAUNCH     = join(__dirname, "sandbox", "launch");
 const ERROR_LOG          = join(__dirname, "errors.log");
 
@@ -23,24 +22,6 @@ const ERROR_LOG          = join(__dirname, "errors.log");
 const config             = parseToml(readFileSync(join(__dirname, "config.toml"), "utf8"));
 const ADMIN_NUMBERS      = new Set(config.admins?.numbers ?? []);
 const GROUP_MENTION_ONLY = config.settings?.group_mention_only ?? true;
-
-// ── Public system prompt ──────────────────────────────────────────────────────
-const PUBLIC_SYSTEM_PROMPT = `\
-You are Índigo, a personal assistant to Óscar F. Gómez, communicating on his behalf via WhatsApp.
-
-Be professional, warm, and neutral. Clear and well-structured. No irony or sarcasm. Always respond in the user's language.
-
-You have access to one tool — a contacts manager — which you may invoke via Bash:
-
-  node ${CONTACTS_BIN_SANDBOX} add --phone <phone> --name "<name>" --description "<description>"
-  node ${CONTACTS_BIN_SANDBOX} edit --phone <phone> --name "<name>" --description "<description>"
-  node ${CONTACTS_BIN_SANDBOX} remove --phone <phone>
-  node ${CONTACTS_BIN_SANDBOX} get --phone <phone>
-  node ${CONTACTS_BIN_SANDBOX} list
-
-All commands output JSON. Phone numbers are digits only (e.g. 521234567890). Use this tool when someone introduces themselves or asks to be remembered.
-
-All other tools (file system, web search, command execution, etc.) are unavailable and will be automatically denied. Do not attempt to use them. When a request requires capabilities you don't have, respond conversationally and explain.`;
 
 // ── Error logging & self-repair ───────────────────────────────────────────────
 let repairInProgress = false;
@@ -198,7 +179,6 @@ function runClaude(jid, prompt, sessionId, admin) {
             safeJid,
             "--permission-mode", admin ? "bypassPermissions" : "dontAsk",
         ];
-        if (!admin) args.push("--system-prompt", PUBLIC_SYSTEM_PROMPT);
         if (sessionId) args.push("--resume", sessionId);
 
         const proc = spawn(SANDBOX_LAUNCH, args);
