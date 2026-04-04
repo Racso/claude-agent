@@ -3,12 +3,14 @@ import makeWASocket, {
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
+    downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import { spawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, unlinkSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { tmpdir } from "os";
 import pino from "pino";
 import { parse as parseToml } from "smol-toml";
 
@@ -81,6 +83,31 @@ function loadContacts() {
     try { return JSON.parse(readFileSync(CONTACTS_FILE, "utf8")); } catch { return {}; }
 }
 
+// ── Voice note transcription ──────────────────────────────────────────────────
+const TRANSCRIBE  = join(__dirname, "transcribe.sh");
+
+async function transcribeVoiceNote(msg) {
+    const buffer  = await downloadMediaMessage(msg, "buffer", {},
+        { logger: pino({ level: "silent" }), reuploadRequest: sock?.updateMediaMessage });
+    const tmpFile = join(tmpdir(), `wa_voice_${Date.now()}_${Math.random().toString(36).slice(2)}.ogg`);
+    writeFileSync(tmpFile, buffer);
+    try {
+        return await new Promise((resolve, reject) => {
+            const proc = spawn(TRANSCRIBE, [tmpFile]);
+            let out = "", err = "";
+            proc.stdout.on("data", d => out += d);
+            proc.stderr.on("data", d => err += d);
+            proc.on("close", code => {
+                if (code !== 0) reject(new Error(`transcribe exit ${code}: ${err.trim()}`));
+                else resolve(out.trim());
+            });
+            proc.on("error", reject);
+        });
+    } finally {
+        try { unlinkSync(tmpFile); } catch {}
+    }
+}
+
 // ── Per-chat queue ────────────────────────────────────────────────────────────
 // Messages queue per JID. When Claude finishes a batch, any messages that
 // arrived in the meantime are sent together in the next call.
@@ -151,8 +178,11 @@ export function extractText(msg) {
 
 // ── Prompt building ───────────────────────────────────────────────────────────
 export function buildPrompt(jid, batch) {
-    const contacts = loadContacts();
-    const isGroup  = jid.endsWith("@g.us");
+    const contacts    = loadContacts();
+    const isGroup     = jid.endsWith("@g.us");
+    const voiceCaveat = batch.some(m => m.voiceNote)
+        ? "\n[Note: contains transcribed voice note(s) — may have errors, infer from context]"
+        : "";
 
     if (isGroup) {
         const lines = batch.map(m => {
@@ -160,7 +190,7 @@ export function buildPrompt(jid, batch) {
             const name = c ? c.name : m.sender;
             return `${name}: ${m.text}`;
         }).join("\n");
-        return `[WhatsApp group ${jid}]\n${lines}`;
+        return `[WhatsApp group ${jid}]${voiceCaveat}\n${lines}`;
     }
 
     const sender  = batch[0].sender;
@@ -168,7 +198,7 @@ export function buildPrompt(jid, batch) {
     const header  = contact
         ? `[WhatsApp DM from ${contact.name} (${sender})${contact.description ? ` — ${contact.description}` : ""}]`
         : `[WhatsApp DM from ${sender}]`;
-    return `${header}\n${batch.map(m => m.text).join("\n")}`;
+    return `${header}${voiceCaveat}\n${batch.map(m => m.text).join("\n")}`;
 }
 
 // ── Claude CLI (sandboxed) ────────────────────────────────────────────────────
@@ -244,9 +274,8 @@ async function connect() {
             const rawSender = isGroup ? (msg.key.participant ?? "") : jid;
             const sender    = rawSender.replace(/@\S+$/, "");
 
-            const text = extractText(msg);
-
             if (process.env.DEBUG_CAPTURE) {
+                const text = extractText(msg);
                 appendFileSync(
                     join(__dirname, "fixtures", "capture.ndjson"),
                     JSON.stringify(msg) + "\n"
@@ -255,6 +284,19 @@ async function connect() {
                 continue;
             }
 
+            const isVoiceNote = msg.message?.audioMessage?.ptt === true;
+            if (isVoiceNote) {
+                if (isGroup && GROUP_MENTION_ONLY) continue;
+                transcribeVoiceNote(msg)
+                    .then(text => enqueue(jid, { text: `[voice note: "${text}"]`, sender, voiceNote: true }))
+                    .catch(e => {
+                        console.error(`[transcribe] ${jid}:`, e.message);
+                        enqueue(jid, { text: "[voice note: transcription failed]", sender, voiceNote: true });
+                    });
+                continue;
+            }
+
+            const text = extractText(msg);
             if (!text) continue;
 
             if (isGroup && GROUP_MENTION_ONLY) {
