@@ -25,12 +25,14 @@ done
 
 # Stable workspace per conversation — persists between calls
 WORKSPACE="/tmp/claude_sandbox_$CONV_ID"
-mkdir -p "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled" "$WORKSPACE/.bin"
+mkdir -p "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled" "$WORKSPACE/.bin" "$WORKSPACE/.wa_out"
 echo "[sandbox] Workspace: $WORKSPACE" >&2
 
-# Inject request_access (refresh on every call in case it was updated)
+# Inject sandbox tools (refresh on every call in case they were updated)
 cp "$SCRIPT_DIR/request_access" "$WORKSPACE/.bin/request_access"
 chmod +x "$WORKSPACE/.bin/request_access"
+cp "$SCRIPT_DIR/wa-out" "$WORKSPACE/.bin/wa-out"
+chmod +x "$WORKSPACE/.bin/wa-out"
 
 # Ensure contacts.json exists so we can bind-mount it rw
 [[ -f "$PROJECT_DIR/contacts.json" ]] || echo '{}' > "$PROJECT_DIR/contacts.json"
@@ -42,7 +44,7 @@ WATCHER_PID=$!
 cleanup() {
     kill "$WATCHER_PID" 2>/dev/null || true
     # Clean per-session dirs but preserve workspace and approved files
-    rm -rf "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled"
+    rm -rf "$WORKSPACE/.requests" "$WORKSPACE/.responses" "$WORKSPACE/.handled" "$WORKSPACE/.wa_out"
     echo "[sandbox] Session ended. Workspace preserved: $WORKSPACE" >&2
 }
 trap cleanup EXIT
@@ -81,9 +83,10 @@ bwrap \
     --proc  /proc \
     --tmpfs /tmp \
     \
-    --setenv HOME         "$HOME" \
-    --setenv PATH         "/workspace/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    --setenv HOME          "$HOME" \
+    --setenv PATH          "/workspace/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     --setenv CONTACTS_FILE /workspace/contacts.json \
+    --setenv WA_REPLY_JID  "${WA_REPLY_JID:-}" \
     \
     --chdir /claude_wa \
     \

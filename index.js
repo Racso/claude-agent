@@ -7,7 +7,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import { spawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, appendFileSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, unlinkSync, mkdirSync, readdirSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { tmpdir } from "os";
@@ -85,6 +85,7 @@ function loadContacts() {
 
 // ── Voice note transcription ──────────────────────────────────────────────────
 const TRANSCRIBE  = join(__dirname, "transcribe.sh");
+const SPEAK       = join(__dirname, "speak.sh");
 
 async function transcribeVoiceNote(msg) {
     const buffer  = await downloadMediaMessage(msg, "buffer", {},
@@ -106,6 +107,74 @@ async function transcribeVoiceNote(msg) {
     } finally {
         try { unlinkSync(tmpFile); } catch {}
     }
+}
+
+// ── Text-to-speech ────────────────────────────────────────────────────────────
+async function textToSpeech(text) {
+    const tmpFile = join(tmpdir(), `wa_tts_${Date.now()}_${Math.random().toString(36).slice(2)}.opus`);
+    await new Promise((resolve, reject) => {
+        const proc = spawn(SPEAK, [text, tmpFile]);
+        let err = "";
+        proc.stderr.on("data", d => err += d);
+        proc.on("close", code => {
+            if (code !== 0) reject(new Error(`speak exit ${code}: ${err.trim()}`));
+            else resolve();
+        });
+        proc.on("error", reject);
+    });
+    const buffer = readFileSync(tmpFile);
+    try { unlinkSync(tmpFile); } catch {}
+    return buffer;
+}
+
+// ── JID resolution ────────────────────────────────────────────────────────────
+function resolveJid(target) {
+    if (!target) throw new Error("No target specified");
+    if (target.includes("@")) return target;
+    const contacts = loadContacts();
+    for (const [phone, c] of Object.entries(contacts)) {
+        if (c.name?.toLowerCase() === target.toLowerCase()) return `${phone}@s.whatsapp.net`;
+    }
+    return `${target.replace(/\D/g, "")}@s.whatsapp.net`;
+}
+
+// ── wa-out monitor ────────────────────────────────────────────────────────────
+// Runs concurrently with a Claude session. Picks up wa-out requests written
+// by Claude inside the sandbox and executes them against the WA socket.
+function startWaOutMonitor(workspace, replyJid) {
+    const dir = join(workspace, ".wa_out");
+    mkdirSync(dir, { recursive: true });
+    const handled = new Set();
+
+    const interval = setInterval(async () => {
+        let files;
+        try { files = readdirSync(dir).filter(f => f.endsWith(".req")); }
+        catch { return; }
+
+        for (const file of files) {
+            const id = file.slice(0, -4);
+            if (handled.has(id)) continue;
+            handled.add(id);
+
+            const respFile = join(dir, `${id}.resp`);
+            try {
+                const req  = JSON.parse(readFileSync(join(dir, file), "utf8"));
+                const toJid = req.mode === "reply" ? replyJid : resolveJid(req.target);
+                if (req.text)  await sock.sendMessage(toJid, { text: req.text });
+                if (req.voice) {
+                    const audio = await textToSpeech(req.voice);
+                    await sock.sendMessage(toJid, { audio, mimetype: "audio/ogg; codecs=opus", ptt: true });
+                }
+                writeFileSync(respFile, "ok\n");
+                console.log(`[wa-out] ${req.mode} → ${toJid}${req.text ? " text" : ""}${req.voice ? " voice" : ""}`);
+            } catch (e) {
+                console.error("[wa-out]", e.message);
+                writeFileSync(respFile, `error: ${e.message}\n`);
+            }
+        }
+    }, 300);
+
+    return () => clearInterval(interval);
 }
 
 // ── Per-chat queue ────────────────────────────────────────────────────────────
@@ -149,7 +218,6 @@ async function processChat(jid) {
                     }
                 }
                 if (result.sessionId) { sessions[jid] = result.sessionId; saveSessions(); }
-                if (result.text) await sock.sendMessage(jid, { text: result.text });
             } catch (e) {
                 console.error(`[claude] ${jid}:`, e.message);
                 logError(e, { jid });
@@ -204,24 +272,27 @@ export function buildPrompt(jid, batch) {
 // ── Claude CLI (sandboxed) ────────────────────────────────────────────────────
 function runClaude(jid, prompt, sessionId, admin) {
     return new Promise((resolve, reject) => {
-        const safeJid = jid.replace(/[^a-zA-Z0-9]/g, "_");
-        const args = [
-            safeJid,
-            "--permission-mode", admin ? "bypassPermissions" : "dontAsk",
-        ];
+        const safeJid   = jid.replace(/[^a-zA-Z0-9]/g, "_");
+        const workspace = `/tmp/claude_sandbox_${safeJid}`;
+        const args      = [safeJid, "--permission-mode", admin ? "bypassPermissions" : "dontAsk"];
         if (sessionId) args.push("--resume", sessionId);
 
-        const proc = spawn(SANDBOX_LAUNCH, args);
+        const stopMonitor = startWaOutMonitor(workspace, jid);
+
+        const proc = spawn(SANDBOX_LAUNCH, args, {
+            env: { ...process.env, WA_REPLY_JID: jid },
+        });
         let out = "", err = "";
         proc.stdout.on("data", d => out += d);
         proc.stderr.on("data", d => err += d);
         proc.stdin.write(prompt);
         proc.stdin.end();
         proc.on("close", code => {
+            stopMonitor();
             if (code !== 0) return reject(new Error(`exit ${code}: ${err.trim()}`));
             resolve(parseClaudeOutput(out));
         });
-        proc.on("error", reject);
+        proc.on("error", e => { stopMonitor(); reject(e); });
     });
 }
 

@@ -1,0 +1,68 @@
+#!/bin/bash
+# Runs INSIDE the bwrap sandbox.
+# Sends a WhatsApp message via the host-side wa-out monitor.
+#
+# Usage:
+#   wa-out --reply --text "message"
+#   wa-out --reply --voice "text to speak"
+#   wa-out --send TARGET --text "message"
+#   wa-out --send TARGET --voice "text to speak"
+#
+# --reply  : send to the conversation that triggered this session
+# --send   : send to TARGET (phone number, JID, or contact name)
+# --text   : send as text message
+# --voice  : send as voice note (TTS on host side)
+# Both --text and --voice can be combined in one call to send both.
+
+set -euo pipefail
+
+MODE=""
+TARGET=""
+TEXT=""
+VOICE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reply)   MODE="reply"; shift ;;
+        --send)    MODE="send"; TARGET="${2:?--send requires TARGET}"; shift 2 ;;
+        --text)    TEXT="${2:?--text requires a value}"; shift 2 ;;
+        --voice)   VOICE="${2:?--voice requires a value}"; shift 2 ;;
+        *)         echo "wa-out: unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+[[ -z "$MODE" ]]       && { echo "wa-out: --reply or --send TARGET required" >&2; exit 1; }
+[[ -z "$TEXT$VOICE" ]] && { echo "wa-out: --text or --voice required" >&2; exit 1; }
+
+WA_OUT_DIR="/workspace/.wa_out"
+ID="$$_${RANDOM}"
+REQ_FILE="$WA_OUT_DIR/$ID.req"
+RESP_FILE="$WA_OUT_DIR/$ID.resp"
+
+python3 -c "
+import json, sys
+print(json.dumps({
+    'id':     sys.argv[1],
+    'mode':   sys.argv[2],
+    'target': sys.argv[3],
+    'text':   sys.argv[4],
+    'voice':  sys.argv[5],
+}))
+" "$ID" "$MODE" "$TARGET" "$TEXT" "$VOICE" > "$REQ_FILE"
+
+# Wait for host response — 30s timeout (100 × 0.3s)
+for _ in $(seq 1 100); do
+    if [[ -f "$RESP_FILE" ]]; then
+        STATUS=$(head -1 "$RESP_FILE")
+        if [[ "$STATUS" == "ok" ]]; then
+            exit 0
+        else
+            echo "wa-out: $STATUS" >&2
+            exit 1
+        fi
+    fi
+    sleep 0.3
+done
+
+echo "wa-out: timed out waiting for host" >&2
+exit 1
