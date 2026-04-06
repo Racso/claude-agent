@@ -275,6 +275,7 @@ function runClaude(jid, prompt, sessionId, admin) {
         const safeJid   = jid.replace(/[^a-zA-Z0-9]/g, "_");
         const workspace = `/tmp/claude_sandbox_${safeJid}`;
         const args      = [safeJid, "--permission-mode", admin ? "bypassPermissions" : "dontAsk"];
+        if (admin) args.push("--admin");
         if (sessionId) args.push("--resume", sessionId);
 
         const stopMonitor = startWaOutMonitor(workspace, jid);
