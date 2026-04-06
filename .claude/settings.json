@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(node /claude_wa/contacts.js *)",
-      "Bash(request_access *)"
+      "Bash(request_access *)",
+      "Bash(wa-out *)"
     ]
   }
 }

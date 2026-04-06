@@ -1,6 +1,6 @@
 [admins]
 # Phone numbers with full admin access (digits only, no + or spaces)
-numbers = ["573163419458"]
+numbers = ["573163419458", "110402302165053"]
 
 [settings]
 # In groups, only respond when the bot is @mentioned
