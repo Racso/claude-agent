@@ -177,6 +177,15 @@ function startWaOutMonitor(workspace, replyJid) {
     return () => clearInterval(interval);
 }
 
+// ── Reactions & presence ──────────────────────────────────────────────────────
+async function react(jid, key, emoji) {
+    try { await sock.sendMessage(jid, { react: { text: emoji, key } }); } catch {}
+}
+
+async function setTyping(jid, on) {
+    try { await sock.sendPresenceUpdate(on ? "composing" : "paused", jid); } catch {}
+}
+
 // ── Per-chat queue ────────────────────────────────────────────────────────────
 // Messages queue per JID. When Claude finishes a batch, any messages that
 // arrived in the meantime are sent together in the next call.
@@ -200,8 +209,15 @@ async function processChat(jid) {
     const admin = isAdminJid(jid);
     try {
         while (queues.get(jid)?.length > 0) {
-            const batch  = queues.get(jid).splice(0);
-            const prompt = buildPrompt(jid, batch);
+            const batch   = queues.get(jid).splice(0);
+            const prompt  = buildPrompt(jid, batch);
+            const lastKey = batch[batch.length - 1].key;
+
+            // React 👇 on all but the last message in a batch, 🤔 on the last
+            for (const m of batch.slice(0, -1)) { if (m.key) react(jid, m.key, "👇"); }
+            if (lastKey) react(jid, lastKey, "🤔");
+            setTyping(jid, true);
+
             try {
                 let sessionId = sessions[jid];
                 let result;
@@ -218,11 +234,14 @@ async function processChat(jid) {
                     }
                 }
                 if (result.sessionId) { sessions[jid] = result.sessionId; saveSessions(); }
+                if (lastKey) react(jid, lastKey, "✅");
             } catch (e) {
                 console.error(`[claude] ${jid}:`, e.message);
                 logError(e, { jid });
                 invokeRepair(e, { jid });
-                try { await sock.sendMessage(jid, { text: "[Error processing message. Please try again.]" }); } catch {}
+                if (lastKey) react(jid, lastKey, "❌");
+            } finally {
+                setTyping(jid, false);
             }
         }
     } finally {
@@ -359,11 +378,12 @@ async function connect() {
             const isVoiceNote = msg.message?.audioMessage?.ptt === true;
             if (isVoiceNote) {
                 if (isGroup && GROUP_MENTION_ONLY) continue;
+                react(jid, msg.key, "👀");
                 transcribeVoiceNote(msg)
-                    .then(text => enqueue(jid, { text: `[voice note: "${text}"]`, sender, voiceNote: true }))
+                    .then(text => enqueue(jid, { text: `[voice note: "${text}"]`, sender, voiceNote: true, key: msg.key }))
                     .catch(e => {
                         console.error(`[transcribe] ${jid}:`, e.message);
-                        enqueue(jid, { text: "[voice note: transcription failed]", sender, voiceNote: true });
+                        enqueue(jid, { text: "[voice note: transcription failed]", sender, voiceNote: true, key: msg.key });
                     });
                 continue;
             }
@@ -376,7 +396,8 @@ async function connect() {
                 if (!mentioned.some(j => j.replace(/:\d+@/, "@") === botJid)) continue;
             }
 
-            enqueue(jid, { text, sender });
+            react(jid, msg.key, "👀");
+            enqueue(jid, { text, sender, key: msg.key });
         }
     });
 }

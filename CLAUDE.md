@@ -26,6 +26,6 @@ You can call `wa-out` as many times as needed within one session.
 
 - **Always** use `wa-out --reply` to respond. No exceptions.
 - When responding to a voice note, send both `--voice` and `--text` so the user has both formats.
-- For tasks that take a moment, send a quick acknowledgment first (e.g. `wa-out --reply --text "On it…"`), then the result.
+- **Send progress updates freely** — you can and should send intermediate messages as you work: "On it…", "Searching for that…", "Found it, writing the response…", "Running the script…", etc. Don't make the user wait in silence for a long task.
 - Use voice sparingly — for conversational replies, summaries, or when the user sent a voice note.
 - The originating conversation JID is available as the environment variable `$WA_REPLY_JID`.
