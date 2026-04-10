@@ -57,10 +57,14 @@ if [[ "$ADMIN" == "true" ]]; then
     cd "$PROJECT_DIR"
     CONTACTS_FILE="$PROJECT_DIR/contacts.json" \
     WA_REPLY_JID="${WA_REPLY_JID:-}" \
+    WA_OUT_DIR="$WORKSPACE/.wa_out" \
     PATH="$WORKSPACE/.bin:$PATH" \
     "$HOME/.local/bin/claude" \
         --print \
-        --output-format json \
+        --output-format stream-json \
+        --verbose \
+        --model sonnet \
+        --effort low \
         "${CLAUDE_ARGS[@]}"
 else
     bwrap \
@@ -107,6 +111,9 @@ else
         -- \
         "$HOME/.local/bin/claude" \
         --print \
-        --output-format json \
+        --output-format stream-json \
+        --verbose \
+        --model sonnet \
+        --effort low \
         "${CLAUDE_ARGS[@]}"
 fi

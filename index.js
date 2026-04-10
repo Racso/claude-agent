@@ -289,6 +289,33 @@ export function buildPrompt(jid, batch) {
 }
 
 // ── Claude CLI (sandboxed) ────────────────────────────────────────────────────
+function trim80(s) {
+    if (!s) return "";
+    const flat = s.replace(/\s+/g, " ").trim();
+    return flat.length > 80 ? flat.slice(0, 77) + "…" : flat;
+}
+
+function logAgentEvent(jid, ev, t0) {
+    const ts = `+${((Date.now() - t0) / 1000).toFixed(2)}s`;
+    if (ev.type === "assistant") {
+        for (const block of ev.message?.content ?? []) {
+            if (block.type === "text" && block.text?.trim())
+                console.log(`[agent] ${jid} | ${ts} | text: "${trim80(block.text)}"`);
+            if (block.type === "tool_use")
+                console.log(`[agent] ${jid} | ${ts} | tool: ${block.name}(${trim80(JSON.stringify(block.input))})`);
+        }
+    } else if (ev.type === "user") {
+        for (const block of ev.message?.content ?? []) {
+            if (block.type === "tool_result") {
+                const content = Array.isArray(block.content)
+                    ? block.content.map(c => c.text ?? "").join(" ")
+                    : (block.content ?? "");
+                console.log(`[agent] ${jid} | ${ts} | tool_result: "${trim80(content)}"`);
+            }
+        }
+    }
+}
+
 function runClaude(jid, prompt, sessionId, admin) {
     return new Promise((resolve, reject) => {
         const safeJid   = jid.replace(/[^a-zA-Z0-9]/g, "_");
@@ -298,36 +325,58 @@ function runClaude(jid, prompt, sessionId, admin) {
         if (sessionId) args.push("--resume", sessionId);
 
         const stopMonitor = startWaOutMonitor(workspace, jid);
+        const t0 = Date.now();
 
         const proc = spawn(SANDBOX_LAUNCH, args, {
             env: { ...process.env, WA_REPLY_JID: jid },
         });
-        let out = "", err = "";
-        proc.stdout.on("data", d => out += d);
+        let buf = "", err = "";
+        const parsedLines = [];
+        proc.stdout.on("data", d => {
+            buf += d;
+            const lines = buf.split("\n");
+            buf = lines.pop(); // keep incomplete last line
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const ev = JSON.parse(line);
+                    parsedLines.push(ev);
+                    logAgentEvent(jid, ev, t0);
+                } catch {}
+            }
+        });
         proc.stderr.on("data", d => err += d);
         proc.stdin.write(prompt);
         proc.stdin.end();
         proc.on("close", code => {
             stopMonitor();
             if (code !== 0) return reject(new Error(`exit ${code}: ${err.trim()}`));
-            resolve(parseClaudeOutput(out));
+            const result  = parseClaudeOutput(parsedLines);
+            const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+            const inTok   = result.inputTokens  ?? "?";
+            const outTok  = result.outputTokens ?? "?";
+            const cliMs  = result.durationMs    != null ? `cli:${(result.durationMs    / 1000).toFixed(2)}s` : null;
+            const apiMs  = result.durationApiMs != null ? `api:${(result.durationApiMs / 1000).toFixed(2)}s` : null;
+            const timing = [elapsed + "s total", cliMs, apiMs].filter(Boolean).join(" | ");
+            console.log(`[perf] ${jid} | ${timing} | ↑${inTok} ↓${outTok} tokens | in: "${trim80(prompt)}" | out: "${trim80(result.text)}"`);
+            resolve(result);
         });
         proc.on("error", e => { stopMonitor(); reject(e); });
     });
 }
 
-export function parseClaudeOutput(raw) {
-    try {
-        const d = JSON.parse(raw.trim());
-        return { text: d.result ?? raw.trim(), sessionId: d.session_id ?? null };
-    } catch {}
-    for (const line of raw.trim().split("\n").reverse()) {
-        try {
-            const d = JSON.parse(line);
-            if (d.type === "result") return { text: d.result ?? "", sessionId: d.session_id ?? null };
-        } catch {}
+export function parseClaudeOutput(events) {
+    for (const d of [...events].reverse()) {
+        if (d.type === "result") return {
+            text: d.result ?? "",
+            sessionId: d.session_id ?? null,
+            inputTokens:  d.usage?.input_tokens  ?? null,
+            outputTokens: d.usage?.output_tokens ?? null,
+            durationMs:   d.duration_ms          ?? null,
+            durationApiMs: d.duration_api_ms     ?? null,
+        };
     }
-    return { text: raw.trim(), sessionId: null };
+    return { text: "", sessionId: null, inputTokens: null, outputTokens: null, durationMs: null, durationApiMs: null };
 }
 
 // ── WhatsApp ──────────────────────────────────────────────────────────────────
@@ -353,8 +402,11 @@ async function connect() {
     });
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        console.log(`[msg] upsert type=${type} count=${messages.length}`);
         if (type !== "notify") return;
         const botJid = sock.user?.id?.replace(/:\d+@/, "@");
+        const botLid = sock.user?.lid?.replace(/:\d+@/, "@");
+        console.log(`[msg] botJid=${botJid} botLid=${botLid}`);
 
         for (const msg of messages) {
             if (msg.key.fromMe) continue;
@@ -393,7 +445,9 @@ async function connect() {
 
             if (isGroup && GROUP_MENTION_ONLY) {
                 const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid ?? [];
-                if (!mentioned.some(j => j.replace(/:\d+@/, "@") === botJid)) continue;
+                console.log(`[msg] group mention check — botJid=${botJid} botLid=${botLid} mentioned=${JSON.stringify(mentioned)}`);
+                const normalised = j => j.replace(/:\d+@/, "@");
+                if (!mentioned.some(j => normalised(j) === botJid || normalised(j) === botLid)) continue;
             }
 
             react(jid, msg.key, "👀");

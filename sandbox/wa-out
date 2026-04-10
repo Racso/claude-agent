@@ -34,7 +34,7 @@ done
 [[ -z "$MODE" ]]       && { echo "wa-out: --reply or --send TARGET required" >&2; exit 1; }
 [[ -z "$TEXT$VOICE" ]] && { echo "wa-out: --text or --voice required" >&2; exit 1; }
 
-WA_OUT_DIR="/workspace/.wa_out"
+WA_OUT_DIR="${WA_OUT_DIR:-/workspace/.wa_out}"
 ID="$$_${RANDOM}"
 REQ_FILE="$WA_OUT_DIR/$ID.req"
 RESP_FILE="$WA_OUT_DIR/$ID.resp"
