@@ -402,11 +402,9 @@ async function connect() {
     });
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
-        console.log(`[msg] upsert type=${type} count=${messages.length}`);
         if (type !== "notify") return;
         const botJid = sock.user?.id?.replace(/:\d+@/, "@");
         const botLid = sock.user?.lid?.replace(/:\d+@/, "@");
-        console.log(`[msg] botJid=${botJid} botLid=${botLid}`);
 
         for (const msg of messages) {
             if (msg.key.fromMe) continue;
@@ -445,7 +443,6 @@ async function connect() {
 
             if (isGroup && GROUP_MENTION_ONLY) {
                 const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid ?? [];
-                console.log(`[msg] group mention check — botJid=${botJid} botLid=${botLid} mentioned=${JSON.stringify(mentioned)}`);
                 const normalised = j => j.replace(/:\d+@/, "@");
                 if (!mentioned.some(j => normalised(j) === botJid || normalised(j) === botLid)) continue;
             }
