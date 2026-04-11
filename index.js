@@ -223,7 +223,7 @@ async function processChat(jid) {
                 try {
                     result = await runClaude(jid, prompt, sessionId, admin);
                 } catch (e) {
-                    if (sessionId && e.message.includes("No conversation found with session ID")) {
+                    if (sessionId && (e.message.includes("No conversation found with session ID") || e.message.match(/^exit 1:/))) {
                         console.warn(`[claude] ${jid}: stale session ${sessionId}, retrying fresh`);
                         delete sessions[jid];
                         saveSessions();
