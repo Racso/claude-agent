@@ -199,17 +199,16 @@ function enqueue(jid, entry) {
     if (!processing.has(jid)) processChat(jid).catch(e => console.error("[processChat]", e));
 }
 
-function isAdminJid(jid) {
-    if (jid.endsWith("@g.us")) return false;
-    return ADMIN_NUMBERS.has(jid.replace(/@\S+$/, ""));
+function isAdminSender(sender) {
+    return ADMIN_NUMBERS.has(sender.replace(/@\S+$/, ""));
 }
 
 async function processChat(jid) {
     processing.add(jid);
-    const admin = isAdminJid(jid);
     try {
         while (queues.get(jid)?.length > 0) {
             const batch   = queues.get(jid).splice(0);
+            const admin   = batch.some(m => isAdminSender(m.sender));
             const prompt  = buildPrompt(jid, batch);
             const lastKey = batch[batch.length - 1].key;
 
