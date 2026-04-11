@@ -62,7 +62,7 @@ if [[ "$ADMIN" == "true" ]]; then
         --output-format stream-json \
         --verbose \
         --model sonnet \
-        --effort low \
+        --effort normal \
         "${CLAUDE_ARGS[@]}"
 else
     bwrap \
@@ -112,6 +112,6 @@ else
         --output-format stream-json \
         --verbose \
         --model sonnet \
-        --effort low \
+        --effort normal \
         "${CLAUDE_ARGS[@]}"
 fi
