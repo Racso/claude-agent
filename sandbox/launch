@@ -33,8 +33,6 @@ echo "[sandbox] Workspace: $WORKSPACE" >&2
 # Inject sandbox tools (refresh on every call in case they were updated)
 cp "$SCRIPT_DIR/request_access" "$WORKSPACE/.bin/request_access"
 chmod +x "$WORKSPACE/.bin/request_access"
-cp "$SCRIPT_DIR/wa-out" "$WORKSPACE/.bin/wa-out"
-chmod +x "$WORKSPACE/.bin/wa-out"
 
 # Ensure contacts.json exists so we can bind-mount it rw
 [[ -f "$PROJECT_DIR/contacts.json" ]] || echo '{}' > "$PROJECT_DIR/contacts.json"

@@ -341,6 +341,10 @@ function runClaude(jid, prompt, sessionId, admin) {
                 try {
                     const ev = JSON.parse(line);
                     parsedLines.push(ev);
+                    if (ev.type === "system" && ev.subtype === "init") {
+                        const mcp = (ev.mcp_servers ?? []).map(s => `${s.name}:${s.status}`).join(", ");
+                        console.log(`[init] ${jid} | mcp: ${mcp || "none"}`);
+                    }
                     logAgentEvent(jid, ev, t0);
                 } catch {}
             }

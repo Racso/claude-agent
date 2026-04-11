@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "wa-out": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["sandbox/mcp-wa-out.js"]
+    }
+  }
+}
