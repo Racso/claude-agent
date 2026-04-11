@@ -424,7 +424,8 @@ async function connect() {
             if (!text) continue;
 
             if (isGroup && GROUP_MENTION_ONLY) {
-                const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid ?? [];
+                const inner      = Object.values(msg.message ?? {})[0];
+                const mentioned  = inner?.contextInfo?.mentionedJid ?? [];
                 const normalised = j => j.replace(/:\d+@/, "@");
                 if (!mentioned.some(j => normalised(j) === botJid || normalised(j) === botLid)) continue;
             }
