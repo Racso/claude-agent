@@ -60,11 +60,18 @@ function loadContacts() {
 const TRANSCRIBE  = join(__dirname, "transcribe.sh");
 const SPEAK       = join(__dirname, "speak.sh");
 
+const VOICE_DEBUG_DIR = join(__dirname, "voice_debug");
+
 async function transcribeVoiceNote(msg) {
-    const buffer  = await downloadMediaMessage(msg, "buffer", {},
+    const buffer   = await downloadMediaMessage(msg, "buffer", {},
         { logger: pino({ level: "silent" }), reuploadRequest: sock?.updateMediaMessage });
-    const tmpFile = join(tmpdir(), `wa_voice_${Date.now()}_${Math.random().toString(36).slice(2)}.ogg`);
+    const filename  = `wa_voice_${Date.now()}_${Math.random().toString(36).slice(2)}.ogg`;
+    const debugFile = join(VOICE_DEBUG_DIR, filename);
+    const tmpFile   = join(tmpdir(), filename);
+    try { mkdirSync(VOICE_DEBUG_DIR, { recursive: true }); } catch {}
     writeFileSync(tmpFile, buffer);
+    writeFileSync(debugFile, buffer);
+    console.log(`[voice] saved ${filename} (${buffer.length} bytes)`);
     try {
         return await new Promise((resolve, reject) => {
             const proc = spawn(TRANSCRIBE, [tmpFile]);
@@ -400,7 +407,7 @@ async function connect() {
                 continue;
             }
 
-            const isVoiceNote = msg.message?.audioMessage?.ptt === true;
+            const isVoiceNote = msg.message?.audioMessage != null;
             if (isVoiceNote) {
                 if (isGroup && GROUP_MENTION_ONLY) continue;
                 react(jid, msg.key, "👀");
