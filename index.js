@@ -25,9 +25,7 @@ const config             = parseToml(readFileSync(join(__dirname, "config.toml")
 const ADMIN_NUMBERS      = new Set(config.admins?.numbers ?? []);
 const GROUP_MENTION_ONLY = config.settings?.group_mention_only ?? true;
 
-// ── Error logging & self-repair ───────────────────────────────────────────────
-let repairInProgress = false;
-
+// ── Error logging ─────────────────────────────────────────────────────────────
 function logError(error, context = {}) {
     const entry = {
         timestamp: new Date().toISOString(),
@@ -38,35 +36,10 @@ function logError(error, context = {}) {
     try { appendFileSync(ERROR_LOG, JSON.stringify(entry) + "\n"); } catch {}
 }
 
-function invokeRepair(error, context = {}) {
-    if (repairInProgress) return;
-    repairInProgress = true;
-
-    const prompt =
-        `An error occurred in the claude_wa WhatsApp bot.\n\n` +
-        `Timestamp: ${new Date().toISOString()}\n` +
-        `Context: ${JSON.stringify(context)}\n` +
-        `Error: ${error.message}\n` +
-        `Stack:\n${error.stack}\n\n` +
-        `Please review the error log (errors.log) and the relevant source files, ` +
-        `identify the root cause, and fix it.`;
-
-    const proc = spawn("claude", ["--dangerously-skip-permissions", "--print", prompt], {
-        cwd: __dirname,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-    });
-    proc.stdout.on("data", d => console.log("[repair]", d.toString().trimEnd()));
-    proc.stderr.on("data", d => console.error("[repair:err]", d.toString().trimEnd()));
-    proc.on("close", () => { repairInProgress = false; });
-    proc.on("error", e => { console.error("[repair:spawn]", e.message); repairInProgress = false; });
-    proc.unref();
-}
-
 process.on("uncaughtException", (e) => {
+    if (e.code === "EPIPE") return; // harmless broken-pipe noise, ignore
     console.error("[uncaughtException]", e.message);
     logError(e, { source: "uncaughtException" });
-    invokeRepair(e, { source: "uncaughtException" });
 });
 
 // ── Session persistence ───────────────────────────────────────────────────────
@@ -237,7 +210,6 @@ async function processChat(jid) {
             } catch (e) {
                 console.error(`[claude] ${jid}:`, e.message);
                 logError(e, { jid });
-                invokeRepair(e, { jid });
                 if (lastKey) react(jid, lastKey, "❌");
             } finally {
                 setTyping(jid, false);
