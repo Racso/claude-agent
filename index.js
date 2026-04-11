@@ -63,8 +63,9 @@ const SPEAK       = join(__dirname, "speak.sh");
 const VOICE_DEBUG_DIR = join(__dirname, "voice_debug");
 
 async function transcribeVoiceNote(msg) {
-    const buffer   = await downloadMediaMessage(msg, "buffer", {},
-        { logger: pino({ level: "silent" }), reuploadRequest: sock?.updateMediaMessage });
+    const freshMsg = await sock.updateMediaMessage(msg).catch(() => msg);
+    const buffer   = await downloadMediaMessage(freshMsg, "buffer", {},
+        { logger: pino({ level: "silent" }), reuploadRequest: m => sock.updateMediaMessage(m) });
     const filename  = `wa_voice_${Date.now()}_${Math.random().toString(36).slice(2)}.ogg`;
     const debugFile = join(VOICE_DEBUG_DIR, filename);
     const tmpFile   = join(tmpdir(), filename);
@@ -420,7 +421,34 @@ async function connect() {
                 continue;
             }
 
-            const text = extractText(msg);
+            let text;
+            if (msg.message?.imageMessage) {
+                const safeJid   = jid.replace(/[^a-zA-Z0-9]/g, "_");
+                const workspace = join("/tmp", `claude_sandbox_${safeJid}`);
+                try {
+                    mkdirSync(workspace, { recursive: true });
+                    const freshMsg = await sock.updateMediaMessage(msg).catch(ue => {
+                        console.error(`[image] ${jid}: updateMediaMessage failed:`, ue.message);
+                        return msg;
+                    });
+                    const buffer   = await downloadMediaMessage(freshMsg, "buffer", {},
+                        { logger: pino({ level: "silent" }), reuploadRequest: m => sock.updateMediaMessage(m) });
+                    const fname    = `image_${Date.now()}.jpg`;
+                    writeFileSync(join(workspace, fname), buffer);
+                    const imgPath  = isAdminSender(sender) ? join(workspace, fname) : `/workspace/${fname}`;
+                    const caption  = msg.message.imageMessage.caption;
+                    text = `[image: ${imgPath}${caption ? `  caption: "${caption}"` : ""}]`;
+                    console.log(`[image] ${jid}: saved ${fname} (${buffer.length} bytes)`);
+                } catch (e) {
+                    console.error(`[image] ${jid}:`, e.message);
+                    console.error(`[image] ${jid}: cause=`, e.cause);
+                    console.error(`[image] ${jid}: stack=`, e.stack?.split("\n").slice(0,4).join(" | "));
+                    text = extractText(msg);
+                }
+            } else {
+                text = extractText(msg);
+            }
+
             if (!text) continue;
 
             if (isGroup && GROUP_MENTION_ONLY) {
